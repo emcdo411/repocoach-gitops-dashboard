@@ -129,7 +129,186 @@ AnsiConsole.MarkupLine($"[yellow]Created new branch: {branch}[/]");
 To run:
 
 ```r
-shiny::runApp('app.R')
+# 📦 Git Log Visualizer: app.R
+
+library(shiny)
+library(shinydashboard)
+library(plotly)
+library(tools)
+library(shinyjs)
+
+custom_css <- "
+  body, .content-wrapper, .main-sidebar {
+    background-color: #121212 !important;
+    color: #ffffff !important;
+  }
+  .box {
+    background-color: #1f1f1f !important;
+    border: 1px solid #333;
+  }
+  .box-header {
+    background-color: #2c2c2c !important;
+  }
+  .skin-blue .main-header .logo {
+    background-color: #222 !important;
+  }
+  .skin-blue .main-header .navbar {
+    background-color: #1a1a1a !important;
+  }
+  .box-primary > .box-header {
+    background-color: #3a3a3a !important;
+  }
+"
+
+ui <- dashboardPage(
+  dashboardHeader(title = span("📊 Git Log Visualizer", style = "color: #00d1b2")),
+  dashboardSidebar(
+    textInput("repo_url", "Enter GitHub Repo URL or 'user/repo'", value = "emcdo411/PromptPilot-Pro"),
+    actionButton("load_repo", "Clone & Visualize Logs", icon = icon("download"))
+  ),
+  dashboardBody(
+    useShinyjs(),
+    tags$head(tags$style(HTML(custom_css))),
+    tabsetPanel(
+      tabPanel("📦 Commit Flow (3D View)",
+               box(width = 12, title = "🧾 Git Log Activity Viewer", status = "primary", solidHeader = TRUE,
+                   plotlyOutput("log_activity_plot"),
+                   tags$div(style = "margin-top:10px;",
+                            tags$strong("Color Legend:"),
+                            tags$ul(
+                              tags$li(span(style = "color:#00c8ff", "➤ Blue: Commits")),
+                              tags$li(span(style = "color:#f97306", "➤ Orange: Merges")),
+                              tags$li(span(style = "color:#39ff14", "➤ Green: Branches")),
+                              tags$li(span(style = "color:#ff2052", "➤ Red: Tag or Hotfixes"))
+                            )
+                   )
+               )
+      ),
+      tabPanel("📈 Commit Signal Timeline",
+               box(width = 12, title = "📈 Commit Signal Timeline", status = "primary", solidHeader = TRUE,
+                   plotlyOutput("radio_wave_plot")
+               )
+      )
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  temp_path <- NULL
+  
+  observeEvent(input$load_repo, {
+    repo_input <- trimws(input$repo_url)
+    if (!grepl("https://", repo_input)) {
+      repo_input <- paste0("https://github.com/", repo_input, ".git")
+    }
+    
+    temp_path <<- file.path(tempdir(), gsub("[/:]", "_", repo_input))
+    if (!dir.exists(temp_path)) {
+      system2("git", c("clone", repo_input, temp_path))
+    }
+    
+    output$log_activity_plot <- renderPlotly({
+      log_data <- tryCatch({
+        raw_log <- system2("git", c("-C", temp_path, "log", "--pretty=format:%h|%an|%s|%cr"), stdout = TRUE)
+        df <- strsplit(raw_log, "\\|")
+        data.frame(
+          Hash = sapply(df, `[`, 1),
+          Author = sapply(df, `[`, 2),
+          Message = sapply(df, `[`, 3),
+          TimeAgo = sapply(df, `[`, 4),
+          Type = sapply(df, function(x) {
+            msg <- tolower(x[3])
+            if (grepl("merge", msg)) return("Merge")
+            else if (grepl("fix|hotfix|patch", msg)) return("Hotfix")
+            else if (grepl("branch", msg)) return("Branch")
+            else return("Commit")
+          }),
+          stringsAsFactors = FALSE
+        )
+      }, error = function(e) data.frame())
+      
+      if (nrow(log_data) == 0) {
+        return(plot_ly() %>% layout(title = "No Git logs found"))
+      }
+      
+      log_data$Index <- seq_len(nrow(log_data))
+      log_data$Weight <- ifelse(log_data$Type == "Merge", 1.5,
+                                ifelse(log_data$Type == "Hotfix", 2,
+                                       ifelse(log_data$Type == "Branch", 0.5, 1)))
+      log_data$Intensity <- cumsum(log_data$Weight)
+      log_data$Frequency <- jitter(as.numeric(factor(log_data$Type)) * 10)
+      
+      color_map <- c("Commit" = "#00c8ff", "Merge" = "#f97306", "Branch" = "#39ff14", "Hotfix" = "#ff2052")
+      
+      plot_ly(log_data, x = ~Index, y = ~Frequency, z = ~Intensity, type = "scatter3d", mode = "lines+markers",
+              line = list(width = 2),
+              marker = list(size = 5),
+              text = ~paste("<b>", Message, "</b><br>", Author, " - ", TimeAgo),
+              color = ~Type, colors = color_map) %>%
+        layout(title = paste("Commit Flow (3D View) for:", basename(temp_path)),
+               scene = list(
+                 xaxis = list(title = "Chronological Index"),
+                 yaxis = list(title = "Type Frequency"),
+                 zaxis = list(title = "Weighted Intensity")
+               ))
+    })
+  })
+  
+  output$radio_wave_plot <- renderPlotly({
+    if (is.null(temp_path)) return(plot_ly() %>% layout(title = "Load a repo to see data"))
+    
+    log_data <- tryCatch({
+      raw_log <- system2("git", c("-C", temp_path, "log", "--pretty=format:%h|%an|%s|%cr"), stdout = TRUE)
+      df <- strsplit(raw_log, "\\|")
+      data.frame(
+        Hash = sapply(df, `[`, 1),
+        Author = sapply(df, `[`, 2),
+        Message = sapply(df, `[`, 3),
+        TimeAgo = sapply(df, `[`, 4),
+        Type = sapply(df, function(x) {
+          msg <- tolower(x[3])
+          if (grepl("merge", msg)) return("Merge")
+          else if (grepl("fix|hotfix|patch", msg)) return("Hotfix")
+          else if (grepl("branch", msg)) return("Branch")
+          else return("Commit")
+        }),
+        stringsAsFactors = FALSE
+      )
+    }, error = function(e) data.frame())
+    
+    if (nrow(log_data) == 0) {
+      return(plot_ly() %>% layout(title = "No Git logs found"))
+    }
+    
+    log_data$Index <- seq_len(nrow(log_data))
+    log_data$MessageLength <- nchar(log_data$Message)
+    log_data$MessageLength[is.na(log_data$MessageLength)] <- 1
+    
+    max_length <- max(log_data$MessageLength, na.rm = TRUE)
+    if (max_length == 0) max_length <- 1
+    
+    log_data$Amplitude <- sin(log_data$Index / 2) *
+      log_data$MessageLength / max_length * 10
+    log_data$Amplitude <- jitter(log_data$Amplitude, factor = 2)
+    
+    color_map <- c("Commit" = "#00c8ff", "Merge" = "#f97306", "Branch" = "#39ff14", "Hotfix" = "#ff2052")
+    
+    plot_ly(log_data, x = ~Index, y = ~Amplitude, type = 'scatter', mode = 'lines+markers',
+            color = ~Type, colors = color_map,
+            line = list(width = 2),
+            marker = list(size = 6),
+            text = ~paste("<b>", Message, "</b><br>", Author, " - ", TimeAgo)) %>%
+      layout(title = "📈 Commit Signal Timeline",
+             xaxis = list(title = "Commit Index"),
+             yaxis = list(title = "Amplitude (Signal Simulation)"),
+             plot_bgcolor = "#121212",
+             paper_bgcolor = "#121212",
+             font = list(color = "#ffffff"))
+  })
+}
+
+shinyApp(ui, server)
+
 ```
 
 ---
